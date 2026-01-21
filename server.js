@@ -1,6 +1,6 @@
 const WebSocket = require('ws');
 
-const PORT = 65535;
+const PORT = process.env.PORT || 65535;
 
 const wss = new WebSocket.Server({ 
     port: PORT,
@@ -151,5 +151,6 @@ process.on('SIGINT', () => {
         process.exit(0);
     });
 });
+
 
 console.log('Server ready!\n');
