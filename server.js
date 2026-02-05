@@ -10,6 +10,8 @@ const wss = new WebSocket.Server({
 
 const clients = new Map();
 
+const callState = new Map();
+
 console.log(`Chat Server started on port ${PORT}`);
 console.log(`Waiting for connections...\n`);
 
@@ -88,78 +90,85 @@ wss.on('connection', (ws) => {
         case 'enable_group':
           ws.send(JSON.stringify({ type: 'group_enabled' }));
           break;
+        case 'call_request': {
+          const target = data.to;
 
-        case 'call_request':
-          const callReceiver = clients.get(data.to);
-          if (callReceiver && callReceiver.readyState === WebSocket.OPEN) {
-            callReceiver.send(JSON.stringify({
-              type: 'call_request',
-              from: data.from
+          if (
+            callState.get(username) !== 'idle' ||
+            callState.get(target) !== 'idle'
+          ) {
+            ws.send(JSON.stringify({
+              type: 'call_failed',
+              reason: 'busy'
             }));
+            return;
           }
-          break;
 
-        case 'call_accepted':
-          const caller = clients.get(data.to);
-          if (caller && caller.readyState === WebSocket.OPEN) {
-            caller.send(JSON.stringify({
-              type: 'call_accepted',
-              from: data.from
-            }));
-          }
-          break;
+          callState.set(username, 'ringing');
+          callState.set(target, 'ringing');
 
-        case 'call_rejected':
-          const rejectedCaller = clients.get(data.to);
-          if (rejectedCaller && rejectedCaller.readyState === WebSocket.OPEN) {
-            rejectedCaller.send(JSON.stringify({
-              type: 'call_rejected',
-              from: data.from
-            }));
-          }
+          clients.get(target)?.send(JSON.stringify({
+            type: 'call_request',
+            from: username
+          }));
           break;
+        }
 
-        case 'call_ended':
-          const endReceiver = clients.get(data.to);
-          if (endReceiver && endReceiver.readyState === WebSocket.OPEN) {
-            endReceiver.send(JSON.stringify({
-              type: 'call_ended',
-              from: data.from
-            }));
-          }
+        case 'call_accepted': {
+          callState.set(username, 'active');
+          callState.set(data.to, 'active');
+
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'call_accepted',
+            from: username
+          }));
           break;
+        }
+
+        case 'call_rejected': {
+          callState.set(username, 'idle');
+          callState.set(data.to, 'idle');
+
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'call_rejected',
+            from: username
+          }));
+          break;
+        }
+
+        case 'call_ended': {
+          callState.set(username, 'idle');
+          callState.set(data.to, 'idle');
+
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'call_ended',
+            from: username
+          }));
+          break;
+        }
 
         case 'webrtc_offer':
-          const offerReceiver = clients.get(data.to);
-          if (offerReceiver && offerReceiver.readyState === WebSocket.OPEN) {
-            offerReceiver.send(JSON.stringify({
-              type: 'webrtc_offer',
-              offer: data.offer,
-              from: data.from
-            }));
-          }
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'webrtc_offer',
+            offer: data.offer,
+            from: username
+          }));
           break;
 
         case 'webrtc_answer':
-          const answerReceiver = clients.get(data.to);
-          if (answerReceiver && answerReceiver.readyState === WebSocket.OPEN) {
-            answerReceiver.send(JSON.stringify({
-              type: 'webrtc_answer',
-              answer: data.answer,
-              from: data.from
-            }));
-          }
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'webrtc_answer',
+            answer: data.answer,
+            from: username
+          }));
           break;
 
         case 'webrtc_ice_candidate':
-          const candidateReceiver = clients.get(data.to);
-          if (candidateReceiver && candidateReceiver.readyState === WebSocket.OPEN) {
-            candidateReceiver.send(JSON.stringify({
-              type: 'webrtc_ice_candidate',
-              candidate: data.candidate,
-              from: data.from
-            }));
-          }
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'webrtc_ice_candidate',
+            candidate: data.candidate,
+            from: username
+          }));
           break;
 
         case 'file':
@@ -228,4 +237,3 @@ process.on('SIGINT', () => {
 
 
 console.log('Server ready!\n');
-
