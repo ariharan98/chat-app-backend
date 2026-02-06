@@ -13,7 +13,7 @@ const wss = new WebSocket.Server({
 });
 
 const clients = new Map();
-
+const callTypes = new Map();
 const callState = new Map();
 
 console.log(`Chat Server started on port ${PORT}`);
@@ -113,6 +113,9 @@ wss.on('connection', (ws) => {
             return;
           }
 
+          callTypes.set(username, data.callType || 'audio');
+          callTypes.set(target, data.callType || 'audio');
+
           callState.set(username, 'ringing');
           callState.set(target, 'ringing');
 
@@ -136,7 +139,9 @@ wss.on('connection', (ws) => {
 
           clients.get(target)?.send(JSON.stringify({
             type: 'call_request',
-            from: username
+            from: username,
+            country: data.country,
+            callType: data.callType || 'audio'
           }));
           break;
         }
@@ -147,6 +152,8 @@ wss.on('connection', (ws) => {
 
           clearTimeout(callTimeouts.get(username));
           clearTimeout(callTimeouts.get(data.to));
+          callTypes.delete(username);
+          callTypes.delete(data.to);
 
           clients.get(data.to)?.send(JSON.stringify({
             type: 'call_accepted',
@@ -175,6 +182,8 @@ wss.on('connection', (ws) => {
 
           clearTimeout(callTimeouts.get(username));
           clearTimeout(callTimeouts.get(data.to));
+          callTypes.delete(username);
+          callTypes.delete(data.to);
 
           clients.get(data.to)?.send(JSON.stringify({
             type: 'call_ended',
@@ -240,6 +249,7 @@ wss.on('connection', (ws) => {
       clearTimeout(callTimeouts.get(username));
       callTimeouts.delete(username);
       clients.delete(username);
+      callTypes.delete(username);
       callState.delete(username);
       console.log(`${username} left (Remaining: ${clients.size})`);
       broadcast({ type: 'user_left', username: username });
