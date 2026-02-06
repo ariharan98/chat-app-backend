@@ -11,6 +11,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "node-fetch": "^3.3.2"
   }
 }
