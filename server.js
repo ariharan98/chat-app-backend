@@ -1,5 +1,7 @@
 const WebSocket = require('ws');
 
+const fetch = global.fetch || require('node-fetch');
+
 const PORT = process.env.PORT || 65535;
 
 const CALL_TIMEOUT_MS = 60000;
@@ -12,17 +14,36 @@ const wss = new WebSocket.Server({
   perMessageDeflate: false
 });
 
+async function detectCountryFromIP(ip) {
+  try {
+    const res = await fetch(`https://ipwho.is/${ip}`);
+    const data = await res.json();
+
+    if (data.success) {
+      return data.country_code;
+    }
+  } catch (e) {
+    console.error('Country detection failed:', e.message);
+  }
+  return null;
+}
+
+
 const clients = new Map();
 const callTypes = new Map();
 const callState = new Map();
+const userCountries = new Map();
 
 console.log(`Chat Server started on port ${PORT}`);
 console.log(`Waiting for connections...\n`);
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   let username = null;
+  const ip =
+    req.headers['x-forwarded-for']?.split(',')[0] ||
+    req.socket.remoteAddress;
 
-  ws.on('message', (message) => {
+  ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message.toString());
 
@@ -38,6 +59,9 @@ wss.on('connection', (ws) => {
             ws.close();
             return;
           }
+
+          const country = await detectCountryFromIP(ip);
+          userCountries.set(username, country);
 
           clients.set(username, ws);
           callState.set(username, 'idle');
@@ -137,10 +161,24 @@ wss.on('connection', (ws) => {
           callTimeouts.set(username, timeout);
           callTimeouts.set(target, timeout);
 
+          const callerCountry = userCountries.get(username);
+          const targetCountry = userCountries.get(target);
+
+          if (
+            callerCountry &&
+            targetCountry &&
+            callerCountry !== targetCountry
+          ) {
+            ws.send(JSON.stringify({
+              type: 'call_rejected',
+              reason: 'DIFFERENT_COUNTRY'
+            }));
+            return;
+          }
+
           clients.get(target)?.send(JSON.stringify({
             type: 'call_request',
             from: username,
-            country: data.country,
             callType: data.callType || 'audio'
           }));
           break;
@@ -250,6 +288,7 @@ wss.on('connection', (ws) => {
       callTimeouts.delete(username);
       clients.delete(username);
       callTypes.delete(username);
+      userCountries.delete(username);
       callState.delete(username);
       console.log(`${username} left (Remaining: ${clients.size})`);
       broadcast({ type: 'user_left', username: username });
