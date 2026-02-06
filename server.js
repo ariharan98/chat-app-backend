@@ -2,10 +2,14 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 65535;
 
+const CALL_TIMEOUT_MS = 60000;
+
+const callTimeouts = new Map();
+
 const wss = new WebSocket.Server({
-    port: PORT,
-    maxPayload: 50 * 1024 * 1024,
-    perMessageDeflate: false
+  port: PORT,
+  maxPayload: 50 * 1024 * 1024,
+  perMessageDeflate: false
 });
 
 const clients = new Map();
@@ -16,229 +20,259 @@ console.log(`Chat Server started on port ${PORT}`);
 console.log(`Waiting for connections...\n`);
 
 wss.on('connection', (ws) => {
-    let username = null;
+  let username = null;
 
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message.toString());
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message.toString());
 
-            switch (data.type) {
-                case 'auth':
-                    username = data.username;
+      switch (data.type) {
+        case 'auth':
+          username = data.username;
 
-                    if (clients.has(username)) {
-                        ws.send(JSON.stringify({
-                            type: 'auth_error',
-                            message: 'Username already taken'
-                        }));
-                        ws.close();
-                        return;
-                    }
+          if (clients.has(username)) {
+            ws.send(JSON.stringify({
+              type: 'auth_error',
+              message: 'Username already taken'
+            }));
+            ws.close();
+            return;
+          }
 
-                    clients.set(username, ws);
-                    callState.set(username, 'idle');
-                    console.log(`${username} joined (Total users: ${clients.size})`);
+          clients.set(username, ws);
+          callState.set(username, 'idle');
+          console.log(`${username} joined (Total users: ${clients.size})`);
 
-                    ws.send(JSON.stringify({ type: 'auth_success' }));
+          ws.send(JSON.stringify({ type: 'auth_success' }));
 
-                    broadcast({
-                        type: 'user_joined',
-                        username: username
-                    }, username);
-                    break;
+          broadcast({
+            type: 'user_joined',
+            username: username
+          }, username);
+          break;
 
-                case 'message':
-                    broadcast({
-                        type: 'message',
-                        sender: username,
-                        content: data.content
-                    }, username);
-                    break;
+        case 'message':
+          broadcast({
+            type: 'message',
+            sender: username,
+            content: data.content
+          }, username);
+          break;
 
-                case 'private_message':
-                    const receiverWs = clients.get(data.receiver);
-                    if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
-                        receiverWs.send(JSON.stringify({
-                            type: 'private_message',
-                            sender: username,
-                            content: data.content
-                        }));
-                    }
-                    break;
+        case 'private_message':
+          const receiverWs = clients.get(data.receiver);
+          if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
+            receiverWs.send(JSON.stringify({
+              type: 'private_message',
+              sender: username,
+              content: data.content
+            }));
+          }
+          break;
 
-                case 'list_users':
-                    const users = Array.from(clients.keys()).map(name => ({
-                        name,
-                        callState: callState.get(name) || 'idle'
-                    }));
+        case 'list_users':
+          const users = Array.from(clients.keys()).map(name => ({
+            name,
+            callState: callState.get(name) || 'idle'
+          }));
 
-                    ws.send(JSON.stringify({
-                        type: 'user_list',
-                        users
-                    }));
-                    break;
+          ws.send(JSON.stringify({
+            type: 'user_list',
+            users
+          }));
+          break;
 
-                case 'enable_private':
-                    if (clients.has(data.receiver)) {
-                        ws.send(JSON.stringify({
-                            type: 'private_enabled',
-                            receiver: data.receiver
-                        }));
-                    } else {
-                        ws.send(JSON.stringify({
-                            type: 'auth_error',
-                            message: `User ${data.receiver} not found`
-                        }));
-                    }
-                    break;
+        case 'enable_private':
+          if (clients.has(data.receiver)) {
+            ws.send(JSON.stringify({
+              type: 'private_enabled',
+              receiver: data.receiver
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: 'auth_error',
+              message: `User ${data.receiver} not found`
+            }));
+          }
+          break;
 
-                case 'enable_group':
-                    ws.send(JSON.stringify({ type: 'group_enabled' }));
-                    break;
-                case 'call_request': {
-                    const target = data.to;
+        case 'enable_group':
+          ws.send(JSON.stringify({ type: 'group_enabled' }));
+          break;
+        case 'call_request': {
+          const target = data.to;
 
-                    if (
-                        callState.get(username) !== 'idle' ||
-                        callState.get(target) !== 'idle'
-                    ) {
-                        ws.send(JSON.stringify({
-                            type: 'call_failed',
-                            reason: 'busy'
-                        }));
-                        return;
-                    }
+          if (
+            callState.get(username) !== 'idle' ||
+            callState.get(target) !== 'idle'
+          ) {
+            ws.send(JSON.stringify({
+              type: 'call_failed',
+              reason: 'busy'
+            }));
+            return;
+          }
 
-                    callState.set(username, 'ringing');
-                    callState.set(target, 'ringing');
+          callState.set(username, 'ringing');
+          callState.set(target, 'ringing');
 
-                    clients.get(target)?.send(JSON.stringify({
-                        type: 'call_request',
-                        from: username
-                    }));
-                    break;
-                }
+          const timeout = setTimeout(() => {
+            if (callState.get(username) === 'ringing') {
+              callState.set(username, 'idle');
+              callState.set(target, 'idle');
 
-                case 'call_accepted': {
-                    callState.set(username, 'active');
-                    callState.set(data.to, 'active');
+              clients.get(username)?.send(JSON.stringify({
+                type: 'call_timeout'
+              }));
 
-                    clients.get(data.to)?.send(JSON.stringify({
-                        type: 'call_accepted',
-                        from: username
-                    }));
-                    break;
-                }
-
-                case 'call_rejected': {
-                    callState.set(username, 'idle');
-                    callState.set(data.to, 'idle');
-
-                    clients.get(data.to)?.send(JSON.stringify({
-                        type: 'call_rejected',
-                        from: username
-                    }));
-                    break;
-                }
-
-                case 'call_ended': {
-                    callState.set(username, 'idle');
-                    callState.set(data.to, 'idle');
-
-                    clients.get(data.to)?.send(JSON.stringify({
-                        type: 'call_ended',
-                        from: username
-                    }));
-                    break;
-                }
-
-                case 'webrtc_offer':
-                    clients.get(data.to)?.send(JSON.stringify({
-                        type: 'webrtc_offer',
-                        offer: data.offer,
-                        from: username
-                    }));
-                    break;
-
-                case 'webrtc_answer':
-                    clients.get(data.to)?.send(JSON.stringify({
-                        type: 'webrtc_answer',
-                        answer: data.answer,
-                        from: username
-                    }));
-                    break;
-
-                case 'webrtc_ice_candidate':
-                    clients.get(data.to)?.send(JSON.stringify({
-                        type: 'webrtc_ice_candidate',
-                        candidate: data.candidate,
-                        from: username
-                    }));
-                    break;
-
-                case 'file':
-                    console.log(`${username} sent file: ${data.fileName} (${formatFileSize(data.fileSize)})`);
-
-                    const fileMessage = {
-                        type: 'file',
-                        sender: username,
-                        fileName: data.fileName,
-                        fileData: data.fileData,
-                        fileSize: data.fileSize
-                    };
-
-                    if (data.receiver === 'GROUP') {
-                        broadcast(fileMessage, username);
-                    } else {
-                        const targetWs = clients.get(data.receiver);
-                        if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                            targetWs.send(JSON.stringify(fileMessage));
-                        }
-                    }
-                    break;
-
+              clients.get(target)?.send(JSON.stringify({
+                type: 'call_timeout'
+              }));
             }
-        } catch (error) {
-            console.error('❌ Error:', error.message);
-        }
-    });
+          }, CALL_TIMEOUT_MS);
 
-    ws.on('close', () => {
-        if (username) {
-            clients.delete(username);
-            callState.delete(username);
-            console.log(`${username} left (Remaining: ${clients.size})`);
-            broadcast({ type: 'user_left', username: username });
-        }
-    });
+          callTimeouts.set(username, timeout);
+          callTimeouts.set(target, timeout);
 
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', error.message);
-    });
+          clients.get(target)?.send(JSON.stringify({
+            type: 'call_request',
+            from: username
+          }));
+          break;
+        }
+
+        case 'call_accepted': {
+          callState.set(username, 'active');
+          callState.set(data.to, 'active');
+
+          clearTimeout(callTimeouts.get(username));
+          clearTimeout(callTimeouts.get(data.to));
+
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'call_accepted',
+            from: username
+          }));
+          break;
+        }
+
+        case 'call_rejected': {
+          callState.set(username, 'idle');
+          callState.set(data.to, 'idle');
+
+          clearTimeout(callTimeouts.get(username));
+          clearTimeout(callTimeouts.get(data.to));
+
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'call_rejected',
+            from: username
+          }));
+          break;
+        }
+
+        case 'call_ended': {
+          callState.set(username, 'idle');
+          callState.set(data.to, 'idle');
+
+          clearTimeout(callTimeouts.get(username));
+          clearTimeout(callTimeouts.get(data.to));
+
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'call_ended',
+            from: username
+          }));
+          break;
+        }
+
+        case 'webrtc_offer':
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'webrtc_offer',
+            offer: data.offer,
+            from: username
+          }));
+          break;
+
+        case 'webrtc_answer':
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'webrtc_answer',
+            answer: data.answer,
+            from: username
+          }));
+          break;
+
+        case 'webrtc_ice_candidate':
+          clients.get(data.to)?.send(JSON.stringify({
+            type: 'webrtc_ice_candidate',
+            candidate: data.candidate,
+            from: username
+          }));
+          break;
+
+        case 'file':
+          console.log(`${username} sent file: ${data.fileName} (${formatFileSize(data.fileSize)})`);
+
+          const fileMessage = {
+            type: 'file',
+            sender: username,
+            fileName: data.fileName,
+            fileData: data.fileData,
+            fileSize: data.fileSize
+          };
+
+          if (data.receiver === 'GROUP') {
+            broadcast(fileMessage, username);
+          } else {
+            const targetWs = clients.get(data.receiver);
+            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+              targetWs.send(JSON.stringify(fileMessage));
+            }
+          }
+          break;
+
+      }
+    } catch (error) {
+      console.error('❌ Error:', error.message);
+    }
+  });
+
+  ws.on('close', () => {
+    if (username) {
+
+      clearTimeout(callTimeouts.get(username));
+      callTimeouts.delete(username);
+      clients.delete(username);
+      callState.delete(username);
+      console.log(`${username} left (Remaining: ${clients.size})`);
+      broadcast({ type: 'user_left', username: username });
+    }
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error.message);
+  });
 });
 
 function broadcast(data, excludeUsername = null) {
-    const message = JSON.stringify(data);
-    clients.forEach((client, user) => {
-        if (user !== excludeUsername && client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
-    });
+  const message = JSON.stringify(data);
+  clients.forEach((client, user) => {
+    if (user !== excludeUsername && client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
 }
 
 function formatFileSize(bytes) {
-    if (!bytes) return '0 B';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
 process.on('SIGINT', () => {
-    console.log('\nShutting down...');
-    wss.close(() => {
-        console.log('erver closed');
-        process.exit(0);
-    });
+  console.log('\nShutting down...');
+  wss.close(() => {
+    console.log('erver closed');
+    process.exit(0);
+  });
 });
 
 
