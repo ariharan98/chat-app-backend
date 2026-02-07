@@ -67,7 +67,11 @@ wss.on('connection', (ws, req) => {
           callState.set(username, 'idle');
           console.log(`${username} joined (Total users: ${clients.size})`);
 
-          ws.send(JSON.stringify({ type: 'auth_success' }));
+          ws.send(JSON.stringify({
+            type: 'auth_success',
+            country
+          }));
+
 
           broadcast({
             type: 'user_joined',
@@ -137,30 +141,6 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-          callTypes.set(username, data.callType || 'audio');
-          callTypes.set(target, data.callType || 'audio');
-
-          callState.set(username, 'ringing');
-          callState.set(target, 'ringing');
-
-          const timeout = setTimeout(() => {
-            if (callState.get(username) === 'ringing') {
-              callState.set(username, 'idle');
-              callState.set(target, 'idle');
-
-              clients.get(username)?.send(JSON.stringify({
-                type: 'call_timeout'
-              }));
-
-              clients.get(target)?.send(JSON.stringify({
-                type: 'call_timeout'
-              }));
-            }
-          }, CALL_TIMEOUT_MS);
-
-          callTimeouts.set(username, timeout);
-          callTimeouts.set(target, timeout);
-
           const callerCountry = userCountries.get(username);
           const targetCountry = userCountries.get(target);
 
@@ -176,6 +156,25 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
+          callTypes.set(username, data.callType || 'audio');
+          callTypes.set(target, data.callType || 'audio');
+
+          callState.set(username, 'ringing');
+          callState.set(target, 'ringing');
+
+          const timeout = setTimeout(() => {
+            if (callState.get(username) === 'ringing') {
+              callState.set(username, 'idle');
+              callState.set(target, 'idle');
+
+              clients.get(username)?.send(JSON.stringify({ type: 'call_timeout' }));
+              clients.get(target)?.send(JSON.stringify({ type: 'call_timeout' }));
+            }
+          }, CALL_TIMEOUT_MS);
+
+          callTimeouts.set(username, timeout);
+          callTimeouts.set(target, timeout);
+
           clients.get(target)?.send(JSON.stringify({
             type: 'call_request',
             from: username,
@@ -190,6 +189,9 @@ wss.on('connection', (ws, req) => {
 
           clearTimeout(callTimeouts.get(username));
           clearTimeout(callTimeouts.get(data.to));
+          callTimeouts.delete(username);
+          callTimeouts.delete(data.to);
+
           callTypes.delete(username);
           callTypes.delete(data.to);
 
@@ -206,6 +208,8 @@ wss.on('connection', (ws, req) => {
 
           clearTimeout(callTimeouts.get(username));
           clearTimeout(callTimeouts.get(data.to));
+          callTimeouts.delete(username);
+          callTimeouts.delete(data.to);
 
           clients.get(data.to)?.send(JSON.stringify({
             type: 'call_rejected',
@@ -220,6 +224,9 @@ wss.on('connection', (ws, req) => {
 
           clearTimeout(callTimeouts.get(username));
           clearTimeout(callTimeouts.get(data.to));
+          callTimeouts.delete(username);
+          callTimeouts.delete(data.to);
+
           callTypes.delete(username);
           callTypes.delete(data.to);
 
@@ -319,7 +326,7 @@ function formatFileSize(bytes) {
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
   wss.close(() => {
-    console.log('erver closed');
+    console.log('Server closed');
     process.exit(0);
   });
 });
