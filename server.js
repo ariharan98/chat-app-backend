@@ -324,6 +324,23 @@ wss.on('connection', (ws, req) => {
           }
           break;
 
+        case 'file_transfer_cancel':
+          if (data.receiver === 'GROUP') {
+            broadcast({
+              type: 'file_transfer_cancel',
+              sender: username
+            }, username);
+          } else {
+            const cancelWs = clients.get(data.receiver);
+            if (cancelWs && cancelWs.readyState === WebSocket.OPEN) {
+              cancelWs.send(JSON.stringify({
+                type: 'file_transfer_cancel',
+                sender: username
+              }));
+            }
+          }
+          break;
+
       }
     } catch (error) {
       console.error('❌ Error:', error.message);
