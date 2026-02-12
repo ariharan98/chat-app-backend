@@ -261,23 +261,65 @@ wss.on('connection', (ws, req) => {
           }));
           break;
 
-        case 'file':
-          console.log(`${username} sent file: ${data.fileName} (${formatFileSize(data.fileSize)})`);
-
-          const fileMessage = {
-            type: 'file',
-            sender: username,
-            fileName: data.fileName,
-            fileData: data.fileData,
-            fileSize: data.fileSize
-          };
-
+        case 'file_chunk_start':
           if (data.receiver === 'GROUP') {
-            broadcast(fileMessage, username);
+            broadcast({
+              type: 'file_chunk_start',
+              sender: username,
+              fileName: data.fileName,
+              fileSize: data.fileSize,
+              totalChunks: data.totalChunks
+            }, username);
           } else {
-            const targetWs = clients.get(data.receiver);
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-              targetWs.send(JSON.stringify(fileMessage));
+            const chunkStartWs = clients.get(data.receiver);
+            if (chunkStartWs && chunkStartWs.readyState === WebSocket.OPEN) {
+              chunkStartWs.send(JSON.stringify({
+                type: 'file_chunk_start',
+                sender: username,
+                fileName: data.fileName,
+                fileSize: data.fileSize,
+                totalChunks: data.totalChunks
+              }));
+            }
+          }
+          break;
+
+        case 'file_chunk':
+          if (data.receiver === 'GROUP') {
+            broadcast({
+              type: 'file_chunk',
+              sender: username,
+              chunkIndex: data.chunkIndex,
+              chunkData: data.chunkData
+            }, username);
+          } else {
+            const chunkWs = clients.get(data.receiver);
+            if (chunkWs && chunkWs.readyState === WebSocket.OPEN) {
+              chunkWs.send(JSON.stringify({
+                type: 'file_chunk',
+                sender: username,
+                chunkIndex: data.chunkIndex,
+                chunkData: data.chunkData
+              }));
+            }
+          }
+          break;
+
+        case 'file_chunk_end':
+          if (data.receiver === 'GROUP') {
+            broadcast({
+              type: 'file_chunk_end',
+              sender: username,
+              fileName: data.fileName
+            }, username);
+          } else {
+            const chunkEndWs = clients.get(data.receiver);
+            if (chunkEndWs && chunkEndWs.readyState === WebSocket.OPEN) {
+              chunkEndWs.send(JSON.stringify({
+                type: 'file_chunk_end',
+                sender: username,
+                fileName: data.fileName
+              }));
             }
           }
           break;
