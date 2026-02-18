@@ -46,6 +46,7 @@ async function detectCountryFromIP(ip) {
 
 
 const clients = new Map();
+const fullNames = new Map(); 
 const callTypes = new Map();
 const callState = new Map();
 const userCountries = new Map();
@@ -118,11 +119,12 @@ wss.on('connection', (ws, req) => {
           }
 
           clients.set(username, ws);
+          fullNames.set(username, fullName);
           callState.set(username, 'idle');
           console.log(`✅ ${fullName} (${username}) joined | Total: ${clients.size}`);
 
           ws.send(JSON.stringify({ type: 'auth_success', isAdmin: false, country: locData.country_code }));
-          broadcast({ type: 'user_joined', username }, username);
+         broadcast({ type: 'user_joined', username: fullNames.get(username) || username }, username);
 
           if (adminClients.size > 0) {
             const allUsers = await getAllUsersForAdmin();
@@ -134,7 +136,7 @@ wss.on('connection', (ws, req) => {
         case 'message':
           broadcast({
             type: 'message',
-            sender: username,
+            sender: fullNames.get(username) || username,
             content: data.content
           }, username);
           break;
@@ -143,7 +145,7 @@ wss.on('connection', (ws, req) => {
           const receiverWs = clients.get(data.receiver);
           if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
             receiverWs.send(JSON.stringify({
-              type: 'private_message',
+              sender: fullNames.get(username) || username,
               sender: username,
               content: data.content
             }));
@@ -153,6 +155,7 @@ wss.on('connection', (ws, req) => {
         case 'list_users':
           const users = Array.from(clients.keys()).map(name => ({
             name,
+            fullName: fullNames.get(name) || name, 
             callState: callState.get(name) || 'idle'
           }));
 
@@ -330,7 +333,7 @@ wss.on('connection', (ws, req) => {
             userCountries.delete(target);
             clearTimeout(callTimeouts.get(target));
             callTimeouts.delete(target);
-            broadcast({ type: 'user_left', username: target });
+            broadcast({ type: 'user_left', username: fullNames.get(username) || username });
           }
           if (usersCollection) await usersCollection.deleteOne({ userName: target });
           const allUsers = await getAllUsersForAdmin();
@@ -444,6 +447,7 @@ wss.on('connection', (ws, req) => {
     clearTimeout(callTimeouts.get(username));
     callTimeouts.delete(username);
     clients.delete(username);
+    fullNames.delete(username);
     callTypes.delete(username);
     userCountries.delete(username);
     callState.delete(username);
@@ -517,5 +521,4 @@ process.on('SIGINT', () => {
 
 
 console.log('Server ready!\n');
-
 
