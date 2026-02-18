@@ -2,27 +2,11 @@ const WebSocket = require('ws');
 
 const fetch = global.fetch || require('node-fetch');
 
-const { MongoClient } = require('mongodb');
-
-const ADMIN_SECRET = process.env.ADMIN_SECRET ;
-const MONGO_URI = process.env.MONGO_URI ;
-
-let usersCollection;
-
-
-MongoClient.connect(MONGO_URI).then(client => {
-  usersCollection = client.db('arattai').collection('users');
-  usersCollection.createIndex({ userName: 1 }, { unique: true });
-  console.log('✅ MongoDB connected');
-}).catch(err => console.error('❌ MongoDB failed:', err.message));
-
-
 const PORT = process.env.PORT || 65535;
 
 const CALL_TIMEOUT_MS = 60000;
 
 const callTimeouts = new Map();
-const adminClients = new Set();
 
 const wss = new WebSocket.Server({
   port: PORT,
@@ -46,7 +30,6 @@ async function detectCountryFromIP(ip) {
 
 
 const clients = new Map();
-const fullNames = new Map(); 
 const callTypes = new Map();
 const callState = new Map();
 const userCountries = new Map();
@@ -65,78 +48,41 @@ wss.on('connection', (ws, req) => {
       const data = JSON.parse(message.toString());
 
       switch (data.type) {
-        case 'auth': {
-          const uName = (data.username || '').trim();
-          const fullName = (data.fullName || '').trim();
+        case 'auth':
+          username = data.username;
 
-          if (!uName) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Username is required' }));
+          if (clients.has(username)) {
+            ws.send(JSON.stringify({
+              type: 'auth_error',
+              message: 'Username already taken'
+            }));
+            ws.close();
             return;
           }
 
-          if (checkAdminCredentials(uName)) {
-            username = uName;
-            adminClients.add(ws);
-            const allUsers = await getAllUsersForAdmin();
-            ws.send(JSON.stringify({ type: 'auth_success', isAdmin: true }));
-            ws.send(JSON.stringify({ type: 'admin_user_list', users: allUsers }));
-            console.log(`🔑 Admin connected`);
-            return;
-          }
-
-
-          if (clients.has(uName)) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Username already taken' }));
-            return;
-          }
-
-          if (!fullName) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Full name is required' }));
-            return;
-          }
-
-          username = uName;
-
-
-          const locData = await (async () => {
-            try {
-              const res = await fetch(`https://ipwho.is/${ip}`);
-              const d = await res.json();
-              if (d.success) return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
-            } catch (e) { }
-            return { city: null, latitude: null, longitude: null, country_code: null };
-          })();
-
-          userCountries.set(username, locData.country_code);
-
-          if (usersCollection) {
-            const now = new Date();
-            await usersCollection.updateOne(
-              { userName: uName },
-              { $set: { fullName, userName: uName, location: { city: locData.city, latitude: locData.latitude, longitude: locData.longitude }, ipAddress: ip, status: 'active', lastSeen: now }, $setOnInsert: { createdAt: now } },
-              { upsert: true }
-            );
-          }
+          const country = await detectCountryFromIP(ip);
+          userCountries.set(username, country);
 
           clients.set(username, ws);
-          fullNames.set(username, fullName);
           callState.set(username, 'idle');
-          console.log(`✅ ${fullName} (${username}) joined | Total: ${clients.size}`);
+          console.log(`${username} joined (Total users: ${clients.size})`);
 
-          ws.send(JSON.stringify({ type: 'auth_success', isAdmin: false, country: locData.country_code }));
-         broadcast({ type: 'user_joined', username: fullNames.get(username) || username }, username);
+          ws.send(JSON.stringify({
+            type: 'auth_success',
+            country
+          }));
 
-          if (adminClients.size > 0) {
-            const allUsers = await getAllUsersForAdmin();
-            broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
-          }
+
+          broadcast({
+            type: 'user_joined',
+            username: username
+          }, username);
           break;
-        }
 
         case 'message':
           broadcast({
             type: 'message',
-            sender: fullNames.get(username) || username,
+            sender: username,
             content: data.content
           }, username);
           break;
@@ -145,7 +91,7 @@ wss.on('connection', (ws, req) => {
           const receiverWs = clients.get(data.receiver);
           if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
             receiverWs.send(JSON.stringify({
-              sender: fullNames.get(username) || username,
+              type: 'private_message',
               sender: username,
               content: data.content
             }));
@@ -155,7 +101,6 @@ wss.on('connection', (ws, req) => {
         case 'list_users':
           const users = Array.from(clients.keys()).map(name => ({
             name,
-            fullName: fullNames.get(name) || name, 
             callState: callState.get(name) || 'idle'
           }));
 
@@ -315,39 +260,6 @@ wss.on('connection', (ws, req) => {
             from: username
           }));
           break;
-        case 'admin_get_users': {
-          if (!adminClients.has(ws)) { ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' })); return; }
-          const allUsers = await getAllUsersForAdmin();
-          ws.send(JSON.stringify({ type: 'admin_user_list', users: allUsers }));
-          break;
-        }
-
-        case 'admin_delete': {
-          if (!adminClients.has(ws)) { ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' })); return; }
-          const target = data.target;
-          if (clients.has(target)) {
-            clients.get(target)?.send(JSON.stringify({ type: 'auth_error', message: 'Removed by admin' }));
-            clients.get(target)?.close();
-            clients.delete(target);
-            callState.delete(target);
-            userCountries.delete(target);
-            clearTimeout(callTimeouts.get(target));
-            callTimeouts.delete(target);
-            broadcast({ type: 'user_left', username: fullNames.get(username) || username });
-          }
-          if (usersCollection) await usersCollection.deleteOne({ userName: target });
-          const allUsers = await getAllUsersForAdmin();
-          broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
-          break;
-        }
-
-        case 'admin_delete_inactive': {
-          if (!adminClients.has(ws)) { ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' })); return; }
-          if (usersCollection) await usersCollection.deleteMany({ status: 'inactive' });
-          const allUsers = await getAllUsersForAdmin();
-          broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
-          break;
-        }
 
         case 'file_chunk_start':
           if (data.receiver === 'GROUP') {
@@ -435,36 +347,17 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', async () => {
-    if (!username) return;
+  ws.on('close', () => {
+    if (username) {
 
-    if (adminClients.has(ws)) {
-      adminClients.delete(ws);
-      console.log('🔑 Admin disconnected');
-      return;
-    }
-
-    clearTimeout(callTimeouts.get(username));
-    callTimeouts.delete(username);
-    clients.delete(username);
-    fullNames.delete(username);
-    callTypes.delete(username);
-    userCountries.delete(username);
-    callState.delete(username);
-    console.log(`👋 ${username} left | Remaining: ${clients.size}`);
-
-    if (usersCollection) {
-      await usersCollection.updateOne(
-        { userName: username },
-        { $set: { status: 'inactive', lastSeen: new Date() } }
-      );
-    }
-
-    broadcast({ type: 'user_left', username });
-
-    if (adminClients.size > 0) {
-      const allUsers = await getAllUsersForAdmin();
-      broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
+      clearTimeout(callTimeouts.get(username));
+      callTimeouts.delete(username);
+      clients.delete(username);
+      callTypes.delete(username);
+      userCountries.delete(username);
+      callState.delete(username);
+      console.log(`${username} left (Remaining: ${clients.size})`);
+      broadcast({ type: 'user_left', username: username });
     }
   });
 
@@ -472,28 +365,6 @@ wss.on('connection', (ws, req) => {
     console.error('WebSocket error:', error.message);
   });
 });
-
-function checkAdminCredentials(username) {
-  const parts = username.split('@');
-  if (parts.length !== 3) return false;
-  if (parts[0] !== 'admin') return false;
-  if (parts[1] !== '*') return false;
-  return parts[2] === ADMIN_SECRET;
-}
-
-async function getAllUsersForAdmin() {
-  if (!usersCollection) return [];
-  return usersCollection.find({})
-    .sort({ status: 1, lastSeen: -1 })
-    .toArray();
-}
-
-function broadcastToAdmins(data) {
-  const message = JSON.stringify(data);
-  adminClients.forEach(ws => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(message);
-  });
-}
 
 function broadcast(data, excludeUsername = null) {
   const message = JSON.stringify(data);
@@ -521,4 +392,3 @@ process.on('SIGINT', () => {
 
 
 console.log('Server ready!\n');
-
