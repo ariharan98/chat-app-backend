@@ -9,15 +9,13 @@ const MONGO_URI = process.env.MONGO_URI ;
 
 let usersCollection;
 
-if (!MONGO_URI) {
-  console.error("❌ MONGO_URI is not set");
-} else {
+
 MongoClient.connect(MONGO_URI).then(client => {
   usersCollection = client.db('arattai').collection('users');
   usersCollection.createIndex({ userName: 1 }, { unique: true });
   console.log('✅ MongoDB connected');
 }).catch(err => console.error('❌ MongoDB failed:', err.message));
-}
+
 
 const PORT = process.env.PORT || 65535;
 
@@ -519,4 +517,5 @@ process.on('SIGINT', () => {
 
 
 console.log('Server ready!\n');
+
 
