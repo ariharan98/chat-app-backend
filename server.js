@@ -91,42 +91,42 @@ wss.on('connection', (ws, req) => {
 
           const locData = await (async () => {
             const isPrivate = !ip || ip === '::1' || ip === '127.0.0.1' ||
-                ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.');
+              ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.');
             if (isPrivate) return { city: 'Local', latitude: null, longitude: null, country_code: null };
-        
+
             try {
-                const res = await fetch(`https://ipwho.is/${ip}`, { signal: AbortSignal.timeout(4000) });
-                const d = await res.json();
-                if (d.success && d.city) {
-                    return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
-                }
+              const res = await fetch(`https://ipwho.is/${ip}`, { signal: AbortSignal.timeout(4000) });
+              const d = await res.json();
+              if (d.success && d.city) {
+                return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
+              }
             } catch (e) { console.warn('ipwho.is failed:', e.message); }
-        
+
             try {
-                const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,city,lat,lon,countryCode`, { signal: AbortSignal.timeout(4000) });
-                const d = await res.json();
-                if (d.status === 'success' && d.city) {
-                    return { city: d.city, latitude: d.lat, longitude: d.lon, country_code: d.countryCode };
-                }
+              const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,city,lat,lon,countryCode`, { signal: AbortSignal.timeout(4000) });
+              const d = await res.json();
+              if (d.status === 'success' && d.city) {
+                return { city: d.city, latitude: d.lat, longitude: d.lon, country_code: d.countryCode };
+              }
             } catch (e) { console.warn('ip-api.com failed:', e.message); }
-        
+
             try {
-                const res = await fetch(`https://ipapi.co/${ip}/json/`, { signal: AbortSignal.timeout(4000) });
-                const d = await res.json();
-                if (d.city && !d.error) {
-                    return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
-                }
+              const res = await fetch(`https://ipapi.co/${ip}/json/`, { signal: AbortSignal.timeout(4000) });
+              const d = await res.json();
+              if (d.city && !d.error) {
+                return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
+              }
             } catch (e) { console.warn('ipapi.co failed:', e.message); }
 
             try {
               const geo = geoip.lookup(ip);
               if (geo && geo.city) {
-                  return { city: geo.city, latitude: geo.ll?.[0] || null, longitude: geo.ll?.[1] || null, country_code: geo.country };
+                return { city: geo.city, latitude: geo.ll?.[0] || null, longitude: geo.ll?.[1] || null, country_code: geo.country };
               }
-          } catch (e) { console.warn('geoip-lite failed:', e.message); }
-        
+            } catch (e) { console.warn('geoip-lite failed:', e.message); }
+
             return { city: null, latitude: null, longitude: null, country_code: null };
-        })();
+          })();
 
           userCountries.set(username, locData.country_code);
 
@@ -367,7 +367,8 @@ wss.on('connection', (ws, req) => {
           if (data.receiver === 'GROUP') {
             broadcast({ type: 'file_transfer_cancel', sender: displayName(username) }, username);
           } else {
-            const cancelWs = clients.get(data.receiver);
+            const cancelTarget = data.receiver || data.to;
+            const cancelWs = clients.get(cancelTarget);
             if (cancelWs?.readyState === WebSocket.OPEN) {
               cancelWs.send(JSON.stringify({ type: 'file_transfer_cancel', sender: displayName(username) }));
             }
