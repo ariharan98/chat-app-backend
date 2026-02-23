@@ -4,6 +4,8 @@ const fetch = global.fetch || require('node-fetch');
 
 const { MongoClient } = require('mongodb');
 
+const geoip = require('geoip-lite');
+
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -46,8 +48,10 @@ console.log(`Waiting for connections...\n`);
 wss.on('connection', (ws, req) => {
   let username = null;
   const ip =
-    req.headers['x-forwarded-for']?.split(',')[0] ||
-    req.socket.remoteAddress;
+    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+    req.headers['x-real-ip'] ||
+    req.socket.remoteAddress?.replace('::ffff:', '') ||
+    null;
 
   ws.on('message', async (message) => {
     try {
@@ -86,13 +90,43 @@ wss.on('connection', (ws, req) => {
           username = uName;
 
           const locData = await (async () => {
+            const isPrivate = !ip || ip === '::1' || ip === '127.0.0.1' ||
+                ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.');
+            if (isPrivate) return { city: 'Local', latitude: null, longitude: null, country_code: null };
+        
             try {
-              const res = await fetch(`https://ipwho.is/${ip}`);
-              const d = await res.json();
-              if (d.success) return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
-            } catch (e) { }
+                const res = await fetch(`https://ipwho.is/${ip}`, { signal: AbortSignal.timeout(4000) });
+                const d = await res.json();
+                if (d.success && d.city) {
+                    return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
+                }
+            } catch (e) { console.warn('ipwho.is failed:', e.message); }
+        
+            try {
+                const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,city,lat,lon,countryCode`, { signal: AbortSignal.timeout(4000) });
+                const d = await res.json();
+                if (d.status === 'success' && d.city) {
+                    return { city: d.city, latitude: d.lat, longitude: d.lon, country_code: d.countryCode };
+                }
+            } catch (e) { console.warn('ip-api.com failed:', e.message); }
+        
+            try {
+                const res = await fetch(`https://ipapi.co/${ip}/json/`, { signal: AbortSignal.timeout(4000) });
+                const d = await res.json();
+                if (d.city && !d.error) {
+                    return { city: d.city, latitude: d.latitude, longitude: d.longitude, country_code: d.country_code };
+                }
+            } catch (e) { console.warn('ipapi.co failed:', e.message); }
+
+            try {
+              const geo = geoip.lookup(ip);
+              if (geo && geo.city) {
+                  return { city: geo.city, latitude: geo.ll?.[0] || null, longitude: geo.ll?.[1] || null, country_code: geo.country };
+              }
+          } catch (e) { console.warn('geoip-lite failed:', e.message); }
+        
             return { city: null, latitude: null, longitude: null, country_code: null };
-          })();
+        })();
 
           userCountries.set(username, locData.country_code);
 
@@ -395,7 +429,12 @@ function checkAdminCredentials(username) {
 
 async function getAllUsersForAdmin() {
   if (!usersCollection) return [];
-  return usersCollection.find({}).sort({ status: 1, lastSeen: -1 }).toArray();
+  const users = await usersCollection.find({}).sort({ status: 1, lastSeen: -1 }).toArray();
+  return users.map(u => ({
+    ...u,
+    _id: u._id?.toString(),
+    location: u.location || { city: null, latitude: null, longitude: null }
+  }));
 }
 
 function broadcastToAdmins(data) {
