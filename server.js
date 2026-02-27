@@ -282,16 +282,17 @@ wss.on('connection', (ws, req) => {
             return;
           }
           globalCallDisabled = false;
-
+          callDisabledUsers.clear();
+        
           clients.forEach((clientWs, user) => {
             if (clientWs.readyState === WebSocket.OPEN) {
               clientWs.send(JSON.stringify({
                 type: 'call_permission_changed',
-                callDisabled: callDisabledUsers.has(user)
+                callDisabled: false
               }));
             }
           });
-
+        
           const allUsers = await getAllUsersForAdmin();
           broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
           break;
