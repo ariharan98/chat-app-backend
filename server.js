@@ -35,6 +35,8 @@ const fullNames = new Map();
 const callTypes = new Map();
 const callState = new Map();
 const userCountries = new Map();
+const callDisabledUsers = new Set();
+let globalCallDisabled = false;
 
 function displayName(uname) {
   const fn = fullNames.get(uname);
@@ -151,7 +153,12 @@ wss.on('connection', (ws, req) => {
           callState.set(username, 'idle');
           console.log(`✅ ${fullName} (${username}) joined | Total: ${clients.size}`);
 
-          ws.send(JSON.stringify({ type: 'auth_success', isAdmin: false, country: locData.country_code }));
+          ws.send(JSON.stringify({
+            type: 'auth_success',
+            isAdmin: false,
+            country: locData.country_code,
+            callDisabled: callDisabledUsers.has(username) || globalCallDisabled
+          }));
 
           broadcast({ type: 'user_joined', username: displayName(username) }, username);
 
@@ -187,7 +194,8 @@ wss.on('connection', (ws, req) => {
             name,
             fullName: fullNames.get(name) || name,
             displayName: displayName(name),
-            callState: callState.get(name) || 'idle'
+            callState: callState.get(name) || 'idle',
+            callDisabled: callDisabledUsers.has(name) || globalCallDisabled
           }));
           ws.send(JSON.stringify({ type: 'user_list', users }));
           break;
@@ -205,8 +213,97 @@ wss.on('connection', (ws, req) => {
           ws.send(JSON.stringify({ type: 'group_enabled' }));
           break;
 
+        case 'admin_disable_call_user': {
+          if (!adminClients.has(ws)) {
+            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
+            return;
+          }
+          const target = data.target;
+          callDisabledUsers.add(target);
+
+          const targetWs = clients.get(target);
+          if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+            targetWs.send(JSON.stringify({
+              type: 'call_permission_changed',
+              callDisabled: true
+            }));
+          }
+
+          const allUsers = await getAllUsersForAdmin();
+          broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
+          break;
+        }
+
+        case 'admin_enable_call_user': {
+          if (!adminClients.has(ws)) {
+            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
+            return;
+          }
+          const target = data.target;
+          callDisabledUsers.delete(target);
+
+          const targetWs = clients.get(target);
+          if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+            targetWs.send(JSON.stringify({
+              type: 'call_permission_changed',
+              callDisabled: globalCallDisabled
+            }));
+          }
+
+          const allUsers = await getAllUsersForAdmin();
+          broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
+          break;
+        }
+
+        case 'admin_disable_call_global': {
+          if (!adminClients.has(ws)) {
+            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
+            return;
+          }
+          globalCallDisabled = true;
+
+          clients.forEach((clientWs, user) => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({
+                type: 'call_permission_changed',
+                callDisabled: true
+              }));
+            }
+          });
+
+          const allUsers = await getAllUsersForAdmin();
+          broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
+          break;
+        }
+
+        case 'admin_enable_call_global': {
+          if (!adminClients.has(ws)) {
+            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
+            return;
+          }
+          globalCallDisabled = false;
+
+          clients.forEach((clientWs, user) => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({
+                type: 'call_permission_changed',
+                callDisabled: callDisabledUsers.has(user)
+              }));
+            }
+          });
+
+          const allUsers = await getAllUsersForAdmin();
+          broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
+          break;
+        }
+
         case 'call_request': {
           const target = data.to;
+
+          if (callDisabledUsers.has(username) || callDisabledUsers.has(target) || globalCallDisabled) {
+            ws.send(JSON.stringify({ type: 'call_disabled' }));
+            return;
+          }
 
           if (callState.get(username) !== 'idle' || callState.get(target) !== 'idle') {
             ws.send(JSON.stringify({ type: 'call_failed', reason: 'busy' }));
@@ -434,7 +531,8 @@ async function getAllUsersForAdmin() {
   return users.map(u => ({
     ...u,
     _id: u._id?.toString(),
-    location: u.location || { city: null, latitude: null, longitude: null }
+    location: u.location || { city: null, latitude: null, longitude: null },
+    callDisabled: callDisabledUsers.has(u.userName) || globalCallDisabled
   }));
 }
 
