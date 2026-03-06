@@ -16,8 +16,6 @@ MongoClient.connect(MONGO_URI).then(client => {
   usersCollection = client.db('arattai').collection('users');
   usersCollection.createIndex({ userName: 1 }, { unique: true });
   console.log('✅ MongoDB connected');
-
-  initializeDefaultGroup();
 }).catch(err => console.error('❌ MongoDB failed:', err.message));
 
 
@@ -40,72 +38,14 @@ const userCountries = new Map();
 const callDisabledUsers = new Set();
 let globalCallDisabled = false;
 
-const groupsCollection = () => usersCollection?.db.collection('groups');
-const userGroups = new Map();
-
-function displayName(connStr) {
-  const parsed = parseConnectionString(connStr);
-  const effectiveUsername = parsed.username || connStr;
-  const fn = fullNames.get(connStr);
-
-  if (fn && fn !== connStr) {
-    return `${fn} (${effectiveUsername})`;
-  }
-  return effectiveUsername;
+function displayName(uname) {
+  const fn = fullNames.get(uname);
+  if (fn && fn !== uname) return `${fn} (${uname})`;
+  return uname;
 }
 
 console.log(`Chat Server started on port ${PORT}`);
 console.log(`Waiting for connections...\n`);
-
-
-function parseConnectionString(connStr) {
-  if (!connStr) return { username: null, group: 'Public' };
-
-  const parts = connStr.split('#private-grp#');
-  if (parts.length === 2) {
-    return { username: parts[0], group: parts[1] };
-  }
-  return { username: connStr, group: 'Public' };
-}
-
-
-function getEffectiveUsername(connStr) {
-  return parseConnectionString(connStr).username;
-}
-
-async function canCommunicate(senderConnStr, receiverConnStr) {
-  const sender = parseConnectionString(senderConnStr);
-  const receiver = parseConnectionString(receiverConnStr);
-
-  if (sender.group === receiver.group) return true;
-
-  if (sender.group === 'Public' || receiver.group === 'Public') return true;
-
-  return false;
-}
-
-
-async function getGroupMembers(groupName) {
-  if (groupName === 'Public') {
-    return Array.from(clients.keys());
-  }
-
-  const groups = groupsCollection();
-  if (!groups) return [];
-
-  const group = await groups.findOne({
-    groupName,
-    status: 'active'
-  });
-
-  if (!group) return [];
-
-  return Array.from(clients.keys()).filter(connStr => {
-    const parsed = parseConnectionString(connStr);
-    return group.members.includes(parsed.username);
-  });
-}
-
 
 wss.on('connection', (ws, req) => {
   let username = null;
@@ -123,7 +63,6 @@ wss.on('connection', (ws, req) => {
         case 'auth': {
           const uName = (data.username || '').trim();
           const fullName = (data.fullName || '').trim();
-          const groupName = data.groupName || 'Public';
 
           if (!uName) {
             ws.send(JSON.stringify({ type: 'auth_error', message: 'Username is required' }));
@@ -140,12 +79,8 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-          const connectionStr = groupName === 'Public'
-            ? uName
-            : `${uName}#private-grp#${groupName}`;
-
-          if (clients.has(connectionStr)) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Already connected' }));
+          if (clients.has(uName)) {
+            ws.send(JSON.stringify({ type: 'auth_error', message: 'Username already taken' }));
             return;
           }
 
@@ -154,28 +89,7 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-
-          if (groupName !== 'Public') {
-            const groups = groupsCollection();
-            if (groups) {
-              const group = await groups.findOne({
-                groupName,
-                status: 'active',
-                members: uName
-              });
-
-              if (!group) {
-                ws.send(JSON.stringify({
-                  type: 'auth_error',
-                  message: 'Not a member of this group'
-                }));
-                return;
-              }
-            }
-          }
-
-          username = connectionStr;
-          const effectiveUsername = uName;
+          username = uName;
 
           const locData = await (async () => {
             const isPrivate = !ip || ip === '::1' || ip === '127.0.0.1' ||
@@ -216,28 +130,18 @@ wss.on('connection', (ws, req) => {
             return { city: null, latitude: null, longitude: null, country_code: null };
           })();
 
-          userCountries.set(effectiveUsername, locData.country_code);
-          userGroups.set(effectiveUsername, groupName);
+          userCountries.set(username, locData.country_code);
 
           if (usersCollection) {
             const now = new Date();
             await usersCollection.updateOne(
-              { userName: effectiveUsername },
+              { userName: uName },
               {
                 $set: {
-                  fullName,
-                  userName: effectiveUsername,
-                  currentGroup: groupName,
-                  location: {
-                    city: locData.city,
-                    latitude: locData.latitude,
-                    longitude: locData.longitude
-                  },
-                  ipAddress: ip,
-                  status: 'active',
-                  lastSeen: now
+                  fullName, userName: uName,
+                  location: { city: locData.city, latitude: locData.latitude, longitude: locData.longitude },
+                  ipAddress: ip, status: 'active', lastSeen: now
                 },
-                $addToSet: { groups: groupName },
                 $setOnInsert: { createdAt: now }
               },
               { upsert: true }
@@ -247,23 +151,16 @@ wss.on('connection', (ws, req) => {
           clients.set(username, ws);
           fullNames.set(username, fullName);
           callState.set(username, 'idle');
-
-          console.log(`✅ ${fullName} (${effectiveUsername}) joined [${groupName}] | Total: ${clients.size}`);
+          console.log(`✅ ${fullName} (${username}) joined | Total: ${clients.size}`);
 
           ws.send(JSON.stringify({
             type: 'auth_success',
             isAdmin: false,
-            groupName: groupName,
             country: locData.country_code,
-            callDisabled: callDisabledUsers.has(effectiveUsername) || globalCallDisabled
+            callDisabled: callDisabledUsers.has(username) || globalCallDisabled
           }));
 
-          const groupMembers = await getGroupMembers(groupName);
-          broadcastToGroup(
-            { type: 'user_joined', username: displayName(username) },
-            groupMembers,
-            username
-          );
+          broadcast({ type: 'user_joined', username: displayName(username) }, username);
 
           if (adminClients.size > 0) {
             const allUsers = await getAllUsersForAdmin();
@@ -272,48 +169,16 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        case 'message': {
-          const senderGroup = parseConnectionString(username).group;
-          const groupMembers = await getGroupMembers(senderGroup);
-
-          await broadcastToGroup({
+        case 'message':
+          broadcast({
             type: 'message',
             sender: displayName(username),
-            content: data.content,
-            group: senderGroup
-          }, groupMembers, username);
+            content: data.content
+          }, username);
           break;
-        }
 
         case 'private_message': {
-          const receiverUsername = data.receiver;
-
-          let receiverConnStr = null;
-          for (const [connStr, ws] of clients.entries()) {
-            if (getEffectiveUsername(connStr) === receiverUsername) {
-              receiverConnStr = connStr;
-              break;
-            }
-          }
-
-          if (!receiverConnStr) {
-            ws.send(JSON.stringify({
-              type: 'auth_error',
-              message: 'User not found'
-            }));
-            return;
-          }
-
-          const allowed = await canCommunicate(username, receiverConnStr);
-          if (!allowed) {
-            ws.send(JSON.stringify({
-              type: 'auth_error',
-              message: 'Cannot message users outside your group'
-            }));
-            return;
-          }
-
-          const receiverWs = clients.get(receiverConnStr);
+          const receiverWs = clients.get(data.receiver);
           if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
             receiverWs.send(JSON.stringify({
               type: 'private_message',
@@ -325,65 +190,24 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'list_users': {
-          const currentUserGroup = parseConnectionString(username).group;
-
-          const users = Array.from(clients.keys())
-            .map(connStr => {
-              const parsed = parseConnectionString(connStr);
-              const effectiveUsername = parsed.username || connStr;
-
-              return {
-                connStr,
-                name: effectiveUsername,
-                fullName: fullNames.get(connStr) || effectiveUsername,
-                displayName: displayName(connStr),
-                callState: callState.get(connStr) || 'idle',
-                callDisabled: callDisabledUsers.has(effectiveUsername) || globalCallDisabled,
-                group: parsed.group
-              };
-            })
-            .filter(user => {
-              if (currentUserGroup === 'Public') return true;
-              return user.group === currentUserGroup || user.group === 'Public';
-            })
-            .map(({ connStr, ...rest }) => rest);
-
+          const users = Array.from(clients.keys()).map(name => ({
+            name,
+            fullName: fullNames.get(name) || name,
+            displayName: displayName(name),
+            callState: callState.get(name) || 'idle',
+            callDisabled: callDisabledUsers.has(name) || globalCallDisabled
+          }));
           ws.send(JSON.stringify({ type: 'user_list', users }));
           break;
-
         }
 
-        case 'enable_private': {
-          let receiverConnStr = null;
-          for (const [connStr, ws] of clients.entries()) {
-            if (getEffectiveUsername(connStr) === data.receiver) {
-              receiverConnStr = connStr;
-              break;
-            }
-          }
-
-          if (receiverConnStr) {
-            const allowed = await canCommunicate(username, receiverConnStr);
-            if (!allowed) {
-              ws.send(JSON.stringify({
-                type: 'auth_error',
-                message: 'Cannot chat with users outside your group'
-              }));
-              return;
-            }
-
-            ws.send(JSON.stringify({
-              type: 'private_enabled',
-              receiver: data.receiver
-            }));
+        case 'enable_private':
+          if (clients.has(data.receiver)) {
+            ws.send(JSON.stringify({ type: 'private_enabled', receiver: data.receiver }));
           } else {
-            ws.send(JSON.stringify({
-              type: 'auth_error',
-              message: `User ${data.receiver} not found`
-            }));
+            ws.send(JSON.stringify({ type: 'auth_error', message: `User ${data.receiver} not found` }));
           }
           break;
-        }
 
         case 'enable_group':
           ws.send(JSON.stringify({ type: 'group_enabled' }));
@@ -459,7 +283,7 @@ wss.on('connection', (ws, req) => {
           }
           globalCallDisabled = false;
           callDisabledUsers.clear();
-
+        
           clients.forEach((clientWs, user) => {
             if (clientWs.readyState === WebSocket.OPEN) {
               clientWs.send(JSON.stringify({
@@ -468,7 +292,7 @@ wss.on('connection', (ws, req) => {
               }));
             }
           });
-
+        
           const allUsers = await getAllUsersForAdmin();
           broadcastToAdmins({ type: 'admin_user_list', users: allUsers });
           break;
@@ -494,25 +318,6 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify({ type: 'call_rejected', reason: 'DIFFERENT_COUNTRY' }));
             return;
           }
-
-          const callerGroup = parseConnectionString(username).group;
-          const targetConnStr = Array.from(clients.keys()).find(
-            connStr => getEffectiveUsername(connStr) === target
-          );
-
-          if (targetConnStr) {
-            const targetGroup = parseConnectionString(targetConnStr).group;
-
-            if (callerGroup !== 'Public' && targetGroup !== 'Public' && callerGroup !== targetGroup) {
-              ws.send(JSON.stringify({
-                type: 'call_rejected',
-                reason: 'DIFFERENT_GROUP',
-                message: 'Cannot call users outside your group'
-              }));
-              return;
-            }
-          }
-
 
           callTypes.set(username, data.callType || 'audio');
           callTypes.set(target, data.callType || 'audio');
@@ -667,234 +472,6 @@ wss.on('connection', (ws, req) => {
             }
           }
           break;
-
-        case 'admin_create_group': {
-          if (!adminClients.has(ws)) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
-            return;
-          }
-
-          const { groupName, members } = data;
-
-          if (!groupName || groupName.trim() === '') {
-            ws.send(JSON.stringify({
-              type: 'error',
-              message: 'Group name is required'
-            }));
-            return;
-          }
-
-          const groups = groupsCollection();
-          if (!groups) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Database error' }));
-            return;
-          }
-
-          const existing = await groups.findOne({ groupName: groupName.trim() });
-          if (existing) {
-            ws.send(JSON.stringify({
-              type: 'error',
-              message: 'Group already exists'
-            }));
-            return;
-          }
-
-          const newGroup = {
-            groupId: `grp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            groupName: groupName.trim(),
-            groupType: 'PRIVATE',
-            createdBy: 'Admin',
-            createdAt: new Date(),
-            members: members || [],
-            isDefault: false,
-            status: 'active'
-          };
-
-          await groups.insertOne(newGroup);
-
-          if (members && members.length > 0) {
-            await usersCollection.updateMany(
-              { userName: { $in: members } },
-              { $addToSet: { groups: groupName.trim() } }
-            );
-          }
-
-          ws.send(JSON.stringify({
-            type: 'group_created',
-            group: newGroup
-          }));
-
-          const allGroups = await groups.find({ status: 'active' }).toArray();
-          ws.send(JSON.stringify({
-            type: 'admin_group_list',
-            groups: allGroups
-          }));
-
-          break;
-        }
-
-        case 'admin_delete_group': {
-          if (!adminClients.has(ws)) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
-            return;
-          }
-
-          const { groupName } = data;
-          const groups = groupsCollection();
-
-          if (!groups) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Database error' }));
-            return;
-          }
-
-          const group = await groups.findOne({ groupName });
-
-          if (!group) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Group not found' }));
-            return;
-          }
-
-          if (group.isDefault) {
-            ws.send(JSON.stringify({
-              type: 'error',
-              message: 'Cannot delete default group'
-            }));
-            return;
-          }
-
-          await groups.updateOne(
-            { groupName },
-            { $set: { status: 'deleted', deletedAt: new Date() } }
-          );
-
-          await usersCollection.updateMany(
-            { groups: groupName },
-            { $pull: { groups: groupName } }
-          );
-
-          clients.forEach((client, connStr) => {
-            const parsed = parseConnectionString(connStr);
-            if (parsed.group === groupName) {
-              client.send(JSON.stringify({
-                type: 'group_deleted',
-                message: 'Your group has been deleted'
-              }));
-              client.close();
-            }
-          });
-
-          ws.send(JSON.stringify({ type: 'group_deleted_success' }));
-
-          const allGroups = await groups.find({ status: 'active' }).toArray();
-          ws.send(JSON.stringify({
-            type: 'admin_group_list',
-            groups: allGroups
-          }));
-
-          break;
-        }
-
-        case 'admin_list_groups': {
-          if (!adminClients.has(ws)) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
-            return;
-          }
-
-          const groups = groupsCollection();
-          if (!groups) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Database error' }));
-            return;
-          }
-
-          const allGroups = await groups.find({ status: 'active' }).toArray();
-          ws.send(JSON.stringify({
-            type: 'admin_group_list',
-            groups: allGroups
-          }));
-
-          break;
-        }
-
-        case 'admin_add_user_to_group': {
-          if (!adminClients.has(ws)) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
-            return;
-          }
-
-          const { groupName, userName } = data;
-          const groups = groupsCollection();
-
-          if (!groups) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Database error' }));
-            return;
-          }
-
-          await groups.updateOne(
-            { groupName, status: 'active' },
-            { $addToSet: { members: userName } }
-          );
-
-          const effectiveUsername = parseConnectionString(username).username;
-
-          await usersCollection.updateOne(
-            { userName: effectiveUsername },
-            { $set: { status: 'inactive', lastSeen: new Date() } }
-          );
-
-          ws.send(JSON.stringify({ type: 'user_added_to_group' }));
-
-          break;
-        }
-
-        case 'admin_remove_user_from_group': {
-          if (!adminClients.has(ws)) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: 'Unauthorized' }));
-            return;
-          }
-
-          const { groupName, userName } = data;
-          const groups = groupsCollection();
-
-          if (!groups) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Database error' }));
-            return;
-          }
-
-          const group = await groups.findOne({ groupName });
-          if (group && group.isDefault) {
-            ws.send(JSON.stringify({
-              type: 'error',
-              message: 'Cannot remove from default group'
-            }));
-            return;
-          }
-
-          await groups.updateOne(
-            { groupName, status: 'active' },
-            { $pull: { members: userName } }
-          );
-
-          await usersCollection.updateOne(
-            { userName },
-            { $pull: { groups: groupName } }
-          );
-
-
-          clients.forEach((client, connStr) => {
-            const parsed = parseConnectionString(connStr);
-            if (parsed.username === userName && parsed.group === groupName) {
-              client.send(JSON.stringify({
-                type: 'removed_from_group',
-                message: 'You have been removed from this group'
-              }));
-              client.close();
-            }
-          });
-
-          ws.send(JSON.stringify({ type: 'user_removed_from_group' }));
-
-          break;
-        }
       }
     } catch (error) {
       console.error('❌ Error:', error.message);
@@ -910,10 +487,6 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    const parsed = parseConnectionString(username);
-    const effectiveUsername = parsed.username || username;
-    const userGroup = parsed.group;
-
     clearTimeout(callTimeouts.get(username));
     callTimeouts.delete(username);
     const dn = displayName(username);
@@ -921,25 +494,18 @@ wss.on('connection', (ws, req) => {
     clients.delete(username);
     fullNames.delete(username);
     callTypes.delete(username);
-    userCountries.delete(effectiveUsername);
-    userGroups.delete(effectiveUsername);
+    userCountries.delete(username);
     callState.delete(username);
     console.log(`👋 ${username} left | Remaining: ${clients.size}`);
 
     if (usersCollection) {
       await usersCollection.updateOne(
-        { userName: effectiveUsername },
+        { userName: username },
         { $set: { status: 'inactive', lastSeen: new Date() } }
       );
     }
 
-    const groupMembers = await getGroupMembers(userGroup);
-    await broadcastToGroup(
-      { type: 'user_left', username: dn },
-      groupMembers,
-      username
-    );
-
+    broadcast({ type: 'user_left', username: dn });
 
     if (adminClients.size > 0) {
       const allUsers = await getAllUsersForAdmin();
@@ -978,7 +544,6 @@ function broadcastToAdmins(data) {
   });
 }
 
-
 function broadcast(data, excludeUsername = null) {
   const message = JSON.stringify(data);
   clients.forEach((client, user) => {
@@ -986,40 +551,6 @@ function broadcast(data, excludeUsername = null) {
       client.send(message);
     }
   });
-}
-
-async function broadcastToGroup(data, groupMembers, excludeUsername = null) {
-  const message = JSON.stringify(data);
-  groupMembers.forEach(connStr => {
-    if (connStr !== excludeUsername) {
-      const client = clients.get(connStr);
-      if (client && client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
-    }
-  });
-}
-
-async function initializeDefaultGroup() {
-  if (!usersCollection) return;
-
-  const groupsCollection = usersCollection.db.collection('groups');
-
-  const publicGroup = await groupsCollection.findOne({ groupName: 'Public' });
-
-  if (!publicGroup) {
-    await groupsCollection.insertOne({
-      groupId: 'grp_public_default',
-      groupName: 'Public',
-      groupType: 'PUBLIC',
-      createdBy: 'System',
-      createdAt: new Date(),
-      members: [],
-      isDefault: true,
-      status: 'active'
-    });
-    console.log('✅ Default Public group created');
-  }
 }
 
 process.on('SIGINT', () => {
